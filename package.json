@@ -1,13 +1,36 @@
 {
   "name": "pi-notes",
   "version": "0.1.0",
-  "private": true,
   "description": "Session-local durable execution checkpoints for Pi",
   "type": "module",
-  "keywords": ["pi-package", "pi-extension", "notes"],
-  "pi": { "extensions": ["./entry.ts"] },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/evanqhuang/pi-notes.git"
+  },
+  "homepage": "https://github.com/evanqhuang/pi-notes#readme",
+  "bugs": {
+    "url": "https://github.com/evanqhuang/pi-notes/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "notes",
+    "task-state",
+    "checkpoint"
+  ],
+  "files": [
+    "entry.ts",
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": ["./entry.ts"]
+  },
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test"
   },

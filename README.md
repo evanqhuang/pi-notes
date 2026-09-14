@@ -2,6 +2,23 @@
 
 `pi-notes` keeps one compact durable continuation/task-state handoff for the current top-level Pi session. `NOTES.md` is not general notes, a diary, or proof.
 
+## Install
+
+Install from the Pi package gallery (npm):
+
+```sh
+pi install npm:pi-notes
+```
+
+Or install the GitHub package directly:
+
+```sh
+pi install git:github.com/evanqhuang/pi-notes
+```
+
+The package requires Pi 0.84.4 or newer and a Node.js version supported by Pi.
+After installing or updating, use `/reload` or start a new Pi session.
+
 ## Storage
 
 Notes are never written into the project tree. Each top-level session owns:
@@ -57,3 +74,17 @@ When present:
 - `pi-plan-mode` may explicitly allowlist `checkpoint_notes`; child sessions do not load `pi-notes`.
 
 A task-state checkpoint records continuity state. It is not verification evidence and does not replace a plan, goal, todo system, or completion verifier.
+
+## Development
+
+```sh
+npm ci
+npm run check
+npm pack --dry-run
+npm audit --omit=dev
+```
+
+The package has no runtime dependencies outside the Pi core packages and
+`typebox`, which Pi provides. The extension runs with the same local access as
+other Pi extensions; review the source before installing it in a sensitive
+environment.
