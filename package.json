@@ -24,6 +24,7 @@
     "entry.ts",
     "index.ts",
     "README.md",
+    "BENCHMARK.md",
     "LICENSE"
   ],
   "pi": {

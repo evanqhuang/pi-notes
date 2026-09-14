@@ -63,6 +63,10 @@ It does not call `pi.setActiveTools()`. If another mode hides `checkpoint_notes`
 
 Lifecycle tests cover fresh identities, branch restoration, resume rematerialization, deferred read/research freshness, read-only threshold and streak reset, delayed checkpoint pressure, compaction pressure, inherited-resume integrity, and external-mutation gating.
 
+## Evaluation
+
+See [BENCHMARK.md](./BENCHMARK.md) for the exploratory long-horizon Notes A/B evaluation, its implementation-quality audit, measurement limitations, and controlled-rerun requirements. The current report is diagnostic case evidence, not a causal product benchmark.
+
 ## Optional integrations
 
 The core has no dependency on goal, plan mode, orchestrator, subagents, memory, or compaction extensions.
