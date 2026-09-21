@@ -639,6 +639,30 @@ function resetIdentity(runtime: NotesRuntime): void {
   runtime.harnessFacts = freshHarnessFacts();
 }
 
+async function restoreRequestedNotes(runtime: NotesRuntime): Promise<void> {
+  const notesId = process.env.PI_NOTES_RESUME_ID;
+  if (!notesId || isChildSession()) return;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(notesId)) {
+    throw new Error("PI_NOTES_RESUME_ID must be a UUID");
+  }
+  const notesPath = notesPathFor(notesId);
+  const file = await lstat(notesPath);
+  if (!file.isFile() || file.isSymbolicLink()) {
+    throw new Error(`Requested Notes checkpoint is not a regular file: ${notesPath}`);
+  }
+  const content = await readFile(notesPath, "utf8");
+  const marker = content.match(/<!-- pi-notes:v1 notesId=([0-9a-f-]+) generation=(\d+) -->\s*$/i);
+  const generation = marker ? Number(marker[2]) : 0;
+  if (!marker || marker[1].toLowerCase() !== notesId.toLowerCase() || !Number.isSafeInteger(generation) || generation < 1) {
+    throw new Error(`Requested Notes checkpoint has an invalid identity or generation: ${notesPath}`);
+  }
+  runtime.notesId = notesId;
+  runtime.notesPath = notesPath;
+  runtime.checkpointGeneration = generation;
+  runtime.lastCheckpointHash = hashText(content);
+  runtime.reentryRequired = runtime.active;
+}
+
 function appendState(pi: ExtensionAPI, runtime: NotesRuntime): void {
   pi.appendEntry<StateRecord>(NOTES_STATE_TYPE, {
     version: NOTES_VERSION,
@@ -704,9 +728,20 @@ function restoreRuntimeState(runtime: NotesRuntime, state: StateRecord | undefin
 
 async function restoreFromBranch(pi: ExtensionAPI, runtime: NotesRuntime, ctx: ExtensionContext, reason: string): Promise<void> {
   const entries = ctx.sessionManager.getBranch();
+  if (reason === "startup" && process.env.PI_NOTES_RESUME_ID && !isChildSession()) {
+    if (entries.some((entry) => compatibleCheckpoint(entry))) {
+      throw new Error("Cannot resume a disk Notes checkpoint into a session with existing Notes history");
+    }
+    resetIdentity(runtime);
+    runtime.active = runtime.activationMode === "manual";
+    await restoreRequestedNotes(runtime);
+    appendState(pi, runtime);
+    return;
+  }
   if (reason === "new" || reason === "fork") {
     resetIdentity(runtime);
     runtime.active = runtime.activationMode === "manual";
+    if (reason === "new") await restoreRequestedNotes(runtime);
     appendState(pi, runtime);
     return;
   }
@@ -1056,6 +1091,7 @@ export default function notesExtension(pi: ExtensionAPI): void {
       if (command === "on") {
         runtime.activationMode = "manual";
         runtime.active = true;
+        if (runtime.lastCheckpointHash) runtime.reentryRequired = true;
         appendState(pi, runtime);
         return displayStatus(ctx, runtime, pi);
       }
