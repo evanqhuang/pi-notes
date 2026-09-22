@@ -83,6 +83,12 @@ export interface NotesRuntime {
   toolCallsThisTurn: number;
   highSignalThisTurn: boolean;
   checkpointGeneration: number;
+  /** Session-local checkpoint preparation and commit telemetry. */
+  checkpointAttempts: number;
+  checkpointNormalized: number;
+  checkpointRejected: number;
+  checkpointCommits: number;
+  checkpointExecutionFailures: number;
   lastCheckpointHash?: string;
   lastCheckpointAt?: number;
   reentryRequired: boolean;
@@ -186,8 +192,8 @@ const MALFORMED_ARROW_SPLIT_FIELD = new RegExp(
 );
 
 /**
- * Repair the one observed model serialization artifact without changing the
- * public checkpoint schema. Invalid or ambiguous input is deliberately left
+ * Repair malformed tool-boundary artifacts without changing the public
+ * checkpoint schema. Invalid or ambiguous input is deliberately left
  * untouched so the normal strict validator remains authoritative.
  */
 export function repairCheckpointArguments(args: unknown): unknown {
@@ -202,9 +208,9 @@ export function repairCheckpointArguments(args: unknown): unknown {
     try {
       parsed = JSON.parse(value);
     } catch {
-      return args;
+      continue;
     }
-    if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) return args;
+    if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) continue;
     input[field] = parsed;
     normalizedCanonicalArray = true;
   }
@@ -252,11 +258,57 @@ export function repairCheckpointArguments(args: unknown): unknown {
   return repaired;
 }
 
+/**
+ * Normalize common compact-model omissions without weakening the final
+ * schema. List fields are semantically allowed to be empty, while the
+ * objective and next action remain required so a checkpoint cannot silently
+ * become stale.
+ */
+export function normalizeCheckpointArguments(args: unknown): unknown {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) return args;
+  const source = args as Record<string, unknown>;
+  const normalized: Record<string, unknown> = { ...source };
+  let changed = false;
+
+  for (const field of CHECKPOINT_ARRAY_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(source, field)) {
+      normalized[field] = [];
+      changed = true;
+      continue;
+    }
+    const value = source[field];
+    if (Array.isArray(value)) continue;
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (!trimmed) {
+      normalized[field] = [];
+      changed = true;
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      parsed = undefined;
+    }
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) normalized[field] = parsed;
+    else if (typeof parsed === "string") normalized[field] = [parsed];
+    else normalized[field] = [value];
+    changed = true;
+  }
+
+  return changed ? normalized : args;
+}
+
 const CHECKPOINT_FAILURE_HINT =
   "Continue the main task; no checkpoint was committed. Do not retry this checkpoint in the same turn; keep a later checkpoint compact.";
+const CHECKPOINT_SCHEMA_HINT =
+  "Use [] for empty list fields; current and next_action are required strings.";
 const CHECKPOINT_FAILURE_COOLDOWN_TURNS = 5;
 const INVALID_CHECKPOINT_MESSAGE = [
   "Invalid checkpoint payload.",
+  CHECKPOINT_SCHEMA_HINT,
   "Limits: current and next_action 1-2048 characters; each list item 1-1024 characters;",
   "completed, findings, decisions, and verification at most 40 items;",
   "failed_approaches and blockers at most 30 items.",
@@ -302,15 +354,16 @@ function checkpointLimitViolation(args: unknown): string | undefined {
 
 export function prepareCheckpointArguments(args: unknown): CheckpointPayload {
   const repaired = repairCheckpointArguments(args);
-  if (!Value.Check(CHECKPOINT_SCHEMA, repaired)) {
-    const detail = checkpointLimitViolation(repaired);
+  const normalized = normalizeCheckpointArguments(repaired);
+  if (!Value.Check(CHECKPOINT_SCHEMA, normalized)) {
+    const detail = checkpointLimitViolation(normalized);
     throw new Error(
       detail
-        ? `Invalid checkpoint payload: ${detail} ${CHECKPOINT_FAILURE_HINT}`
+        ? `Invalid checkpoint payload: ${detail} ${CHECKPOINT_SCHEMA_HINT} ${CHECKPOINT_FAILURE_HINT}`
         : INVALID_CHECKPOINT_MESSAGE,
     );
   }
-  return repaired as CheckpointPayload;
+  return normalized as CheckpointPayload;
 }
 
 function freshHarnessFacts(): HarnessFacts {
@@ -350,6 +403,11 @@ export function createRuntime(mode: ActivationMode = DEFAULT_CONFIG.activationMo
     toolCallsThisTurn: 0,
     highSignalThisTurn: false,
     checkpointGeneration: 0,
+    checkpointAttempts: 0,
+    checkpointNormalized: 0,
+    checkpointRejected: 0,
+    checkpointCommits: 0,
+    checkpointExecutionFailures: 0,
     reentryRequired: false,
     harnessFacts: freshHarnessFacts(),
     checkpointInFlight: false,
@@ -578,23 +636,43 @@ async function commitCheckpoint(pi: ExtensionAPI, runtime: NotesRuntime, payload
     if (bytes > DEFAULT_CONFIG.notesMaxBytes) {
       throw new Error(`Rendered Notes exceed ${DEFAULT_CONFIG.notesMaxBytes} bytes (${bytes}); keep only continuation-relevant state`);
     }
-    await atomicWrite(runtime.notesPath, rendered);
-    if (runtime.sessionEnded) throw new Error("The session was replaced before the Notes checkpoint completed");
+    const previousNotes = await readFile(runtime.notesPath, "utf8").catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
     const hash = hashText(rendered);
     const generation = runtime.checkpointGeneration + 1;
     const checkpointedAt = Date.now();
-    pi.appendEntry<CheckpointRecord>(NOTES_CHECKPOINT_TYPE, {
-      version: NOTES_VERSION,
-      notesId: runtime.notesId,
-      activationMode: runtime.activationMode,
-      active: true,
-      generation,
-      notesPath: runtime.notesPath,
-      hash,
-      checkpointedAt,
-      payload,
-      harnessFacts: persistentFacts(runtime),
-    });
+    let materialized = false;
+    try {
+      await atomicWrite(runtime.notesPath, rendered);
+      materialized = true;
+      if (runtime.sessionEnded) throw new Error("The session was replaced before the Notes checkpoint completed");
+      pi.appendEntry<CheckpointRecord>(NOTES_CHECKPOINT_TYPE, {
+        version: NOTES_VERSION,
+        notesId: runtime.notesId,
+        activationMode: runtime.activationMode,
+        active: true,
+        generation,
+        notesPath: runtime.notesPath,
+        hash,
+        checkpointedAt,
+        payload,
+        harnessFacts: persistentFacts(runtime),
+      });
+    } catch (error) {
+      if (materialized) {
+        try {
+          if (previousNotes === undefined) await unlink(runtime.notesPath);
+          else await atomicWrite(runtime.notesPath, previousNotes);
+        } catch (rollbackError) {
+          throw new Error(
+            `Notes checkpoint failed and rollback failed: ${error instanceof Error ? error.message : String(error)}; ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+          );
+        }
+      }
+      throw error;
+    }
     runtime.checkpointGeneration = generation;
     runtime.lastCheckpointHash = hash;
     runtime.lastCheckpointAt = checkpointedAt;
@@ -636,6 +714,11 @@ function resetIdentity(runtime: NotesRuntime): void {
   runtime.sawHighSignalActivity = false;
   runtime.toolCallsThisTurn = 0;
   runtime.highSignalThisTurn = false;
+  runtime.checkpointAttempts = 0;
+  runtime.checkpointNormalized = 0;
+  runtime.checkpointRejected = 0;
+  runtime.checkpointCommits = 0;
+  runtime.checkpointExecutionFailures = 0;
   runtime.harnessFacts = freshHarnessFacts();
 }
 
@@ -976,6 +1059,7 @@ const CHECKPOINT_FIELD_GUIDANCE = [
   "blockers = unresolved impediments.",
   "verification = verification commands and outcomes only.",
   "next_action = the one next concrete action.",
+  "Use [] for empty list fields; keep current and next_action as strings.",
   "Do not put verification in completed, repeat current in next_action, or copy deterministic working-set facts such as modified files into authored sections; the extension supplies those facts separately.",
   "Use a compact budget well below the hard limits: current <=400 characters, next_action <=250 characters, at most 3 items per list, and each item <=180 characters.",
   "Never paste plans, logs, raw test output, or file lists. Keep only facts needed to resume; the extension adds the deterministic working set automatically.",
@@ -1026,6 +1110,7 @@ function displayStatus(ctx: ExtensionContext, runtime: NotesRuntime, pi: Extensi
     `checkpoint due: ${runtime.checkpointDue}`,
     `checkpoint failures: ${runtime.checkpointFailureCount}`,
     `checkpoint retry after turn: ${runtime.checkpointFailureCount ? runtime.checkpointRetryAfterTurn : "none"}`,
+    `checkpoint telemetry: attempts ${runtime.checkpointAttempts}, normalized ${runtime.checkpointNormalized}, rejected ${runtime.checkpointRejected}, committed ${runtime.checkpointCommits}, execution failures ${runtime.checkpointExecutionFailures}`,
     `generation: ${runtime.checkpointGeneration}`,
     `path: ${runtime.notesPath}`,
     `tool policy: ${paused ? "paused-by-tool-policy" : "available"}`,
@@ -1064,21 +1149,34 @@ export default function notesExtension(pi: ExtensionAPI): void {
     ],
     parameters: CHECKPOINT_SCHEMA,
     prepareArguments(args) {
-      const prepared = prepareCheckpointArguments(args);
-      const rendered = renderNotes(prepared, runtime);
-      const bytes = Buffer.byteLength(rendered, "utf8");
-      if (bytes > DEFAULT_CONFIG.notesMaxBytes) {
-        throw new Error(`Invalid checkpoint payload: rendered Notes exceed ${DEFAULT_CONFIG.notesMaxBytes} bytes (${bytes}); keep only compact continuation state. ${CHECKPOINT_FAILURE_HINT}`);
+      runtime.checkpointAttempts += 1;
+      try {
+        const prepared = prepareCheckpointArguments(args);
+        if (prepared !== args) runtime.checkpointNormalized += 1;
+        const rendered = renderNotes(prepared, runtime);
+        const bytes = Buffer.byteLength(rendered, "utf8");
+        if (bytes > DEFAULT_CONFIG.notesMaxBytes) {
+          throw new Error(`Invalid checkpoint payload: rendered Notes exceed ${DEFAULT_CONFIG.notesMaxBytes} bytes (${bytes}); keep only compact continuation state. ${CHECKPOINT_FAILURE_HINT}`);
+        }
+        return prepared;
+      } catch (error) {
+        runtime.checkpointRejected += 1;
+        throw error;
       }
-      return prepared;
     },
     executionMode: "sequential",
     async execute(_toolCallId, params) {
-      const committed = await commitCheckpoint(pi, runtime, params as CheckpointPayload);
-      return {
-        content: [{ type: "text" as const, text: `Notes checkpoint committed: ${runtime.notesPath} (generation ${committed.generation}, sha256 ${committed.hash.slice(0, 12)})` }],
-        details: { notesPath: runtime.notesPath, generation: committed.generation, hash: committed.hash },
-      };
+      try {
+        const committed = await commitCheckpoint(pi, runtime, params as CheckpointPayload);
+        runtime.checkpointCommits += 1;
+        return {
+          content: [{ type: "text" as const, text: `Notes checkpoint committed: ${runtime.notesPath} (generation ${committed.generation}, sha256 ${committed.hash.slice(0, 12)})` }],
+          details: { notesPath: runtime.notesPath, generation: committed.generation, hash: committed.hash },
+        };
+      } catch (error) {
+        runtime.checkpointExecutionFailures += 1;
+        throw error;
+      }
     },
   });
 

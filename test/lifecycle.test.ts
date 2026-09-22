@@ -61,12 +61,14 @@ async function makeHarness(initialBranch: any[] = [], existingRoot?: string) {
   const notifications: Array<{ message: string; level: string }> = [];
   const sentMessages: any[] = [];
   let activeToolsStale = false;
+  let appendEntryError: Error | undefined;
 
   const pi = {
     registerTool(tool: any) { tools.set(tool.name, tool); },
     registerCommand(name: string, command: any) { commands.set(name, command); },
     on(name: string, handler: (...args: any[]) => any) { handlers.set(name, handler); },
     appendEntry(customType: string, data: unknown) {
+      if (appendEntryError) throw appendEntryError;
       branch.push({ type: "custom", customType, data });
     },
     getActiveTools() {
@@ -102,6 +104,7 @@ async function makeHarness(initialBranch: any[] = [], existingRoot?: string) {
     notifications,
     sentMessages,
     setActiveToolsStale(value: boolean) { activeToolsStale = value; },
+    setAppendEntryError(error: Error | undefined) { appendEntryError = error; },
     get branch() { return branch; },
     setBranch(next: any[]) { branch = next; },
     async status() {
@@ -268,6 +271,29 @@ describe("session lifecycle integration", () => {
     expect(() => h.checkpointTool.prepareArguments(tooLong)).toThrow(/Invalid checkpoint payload/);
   });
 
+  it("reports checkpoint normalization and rejection telemetry", async () => {
+    const h = await makeHarness();
+    await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+    await h.command.handler("on", h.ctx);
+
+    const prepared = h.checkpointTool.prepareArguments({
+      current: "Normalize compact checkpoint input.",
+      completed: "Accepted scalar completion.",
+      next_action: "Run the focused checks.",
+    });
+    expect(prepared.completed).toEqual(["Accepted scalar completion."]);
+    expect(await h.status()).toContain("checkpoint telemetry: attempts 1, normalized 1, rejected 0, committed 0, execution failures 0");
+
+    await h.checkpointTool.execute("cp-telemetry", prepared);
+    expect(await h.status()).toContain("checkpoint telemetry: attempts 1, normalized 1, rejected 0, committed 1, execution failures 0");
+
+    expect(() => h.checkpointTool.prepareArguments({
+      ...payload,
+      current: "x".repeat(2049),
+    })).toThrow(/current is 2049 characters/);
+    expect(await h.status()).toContain("checkpoint telemetry: attempts 2, normalized 1, rejected 1, committed 1, execution failures 0");
+  });
+
   it("rejects an oversized current field without echoing or changing committed state", async () => {
     const h = await makeHarness();
     await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
@@ -292,7 +318,8 @@ describe("session lifecycle integration", () => {
     expect(failure?.message.length).toBeLessThan(400);
     expect(h.branch).toHaveLength(branchLengthBefore);
     expect(await readFile(notesPath, "utf8")).toBe(notesBefore);
-    expect(await h.status()).toBe(statusBefore);
+    expect(await h.status()).not.toBe(statusBefore);
+    expect(await h.status()).toContain("checkpoint telemetry: attempts 1, normalized 0, rejected 1, committed 1, execution failures 0");
     expect(latestCustom(h.branch, NOTES_CHECKPOINT_TYPE).data.generation).toBe(1);
   });
 
@@ -351,6 +378,40 @@ describe("session lifecycle integration", () => {
     await h.checkpointTool.execute("cp-recovered", payload);
     expect(await h.status()).toContain("checkpoint failures: 0");
     expect(await h.status()).toContain("dirty: false");
+  });
+
+  it("rolls back materialized Notes when the session journal append fails", async () => {
+    const h = await makeHarness();
+    await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+    await h.command.handler("on", h.ctx);
+    const committed = await h.checkpointTool.execute("cp-1", payload);
+    const notesPath = committed.details.notesPath as string;
+    const notesBefore = await readFile(notesPath, "utf8");
+
+    h.handlers.get("tool_result")!({
+      toolName: "write",
+      input: { path: "src/changed.ts" },
+      isError: false,
+    });
+    const branchLengthBefore = h.branch.length;
+    h.setAppendEntryError(new Error("journal append failed"));
+
+    await expect(h.checkpointTool.execute("cp-journal-failed", {
+      ...payload,
+      current: "The journal append failed; preserve the prior checkpoint.",
+    })).rejects.toThrow(/journal append failed/);
+
+    expect(h.branch).toHaveLength(branchLengthBefore);
+    expect(await readFile(notesPath, "utf8")).toBe(notesBefore);
+    expect(await h.status()).toContain("execution failures 1");
+
+    h.setAppendEntryError(undefined);
+    const recovered = await h.checkpointTool.execute("cp-recovered", {
+      ...payload,
+      current: "The journal append failure was recovered.",
+    });
+    expect(recovered.details.generation).toBe(2);
+    expect(await readFile(notesPath, "utf8")).not.toBe(notesBefore);
   });
 
   it("blocks an immediate retry after checkpoint failure", async () => {

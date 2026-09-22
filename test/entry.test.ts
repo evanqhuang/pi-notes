@@ -54,11 +54,53 @@ describe("extension entry isolation", () => {
     expect(prepared.verification).toEqual(["npm test passed"]);
   });
 
-  it("reports the first missing canonical field instead of a generic schema failure", () => {
+  it("fills omitted list fields and wraps scalar list fields", () => {
+    const prepared = prepareCheckpointArguments({
+      current: "Resume the task.",
+      completed: "Implemented the parser.",
+      findings: "A scalar finding.",
+      next_action: "Run the final checks.",
+    });
+
+    expect(prepared.completed).toEqual(["Implemented the parser."]);
+    expect(prepared.findings).toEqual(["A scalar finding."]);
+    expect(prepared.decisions).toEqual([]);
+    expect(prepared.failed_approaches).toEqual([]);
+    expect(prepared.blockers).toEqual([]);
+    expect(prepared.verification).toEqual([]);
+  });
+
+  it("repairs malformed fields alongside scalar list fields", () => {
+    const prepared = prepareCheckpointArguments({
+      current: "Resume the task.",
+      completed: "Implemented the parser.",
+      [`findings]\n${JSON.stringify(["Recovered the malformed field."])}\n</parameter`]: "",
+      next_action: "Run the final checks.",
+    });
+
+    expect(prepared.completed).toEqual(["Implemented the parser."]);
+    expect(prepared.findings).toEqual(["Recovered the malformed field."]);
+  });
+
+  it("keeps current and next_action required", () => {
+    expect(() => prepareCheckpointArguments({
+      completed: [],
+      findings: [],
+      decisions: [],
+      failed_approaches: [],
+      blockers: [],
+      verification: [],
+      next_action: "Run the final checks.",
+    })).toThrow(/current is required/);
+
     expect(() => prepareCheckpointArguments({
       current: "Resume the task.",
       completed: [],
-      next_action: "Run the final checks.",
-    })).toThrow(/findings is required/);
+      findings: [],
+      decisions: [],
+      failed_approaches: [],
+      blockers: [],
+      verification: [],
+    })).toThrow(/next_action is required/);
   });
 });
