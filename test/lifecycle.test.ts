@@ -646,6 +646,19 @@ describe("session lifecycle integration", () => {
     expect(policy.systemPrompt).toContain("Never paste plans, logs, raw test output, or file lists.");
   });
 
+  it("keeps the system prompt stable when automatic activation flips on", async () => {
+    const h = await makeHarness();
+    const beforeActivation = h.handlers.get("before_agent_start")!({ systemPrompt: "base" }, h.ctx);
+
+    for (let index = 0; index < DEFAULT_CONFIG.autoActivation.toolCalls; index += 1) {
+      h.handlers.get("tool_result")!({ toolName: "write", input: { path: `src/${index}.ts` }, isError: false });
+    }
+
+    expect(await h.status()).toContain("active: true");
+    const afterActivation = h.handlers.get("before_agent_start")!({ systemPrompt: "base" }, h.ctx);
+    expect(afterActivation.systemPrompt).toBe(beforeActivation.systemPrompt);
+  });
+
   it("applies checkpoint pressure after high-signal results or dirty turns", async () => {
     const byResults = await makeHarness();
     await byResults.handlers.get("session_start")!({ reason: "new" }, byResults.ctx);

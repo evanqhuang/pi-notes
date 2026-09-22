@@ -1068,12 +1068,16 @@ const CHECKPOINT_FIELD_GUIDANCE = [
 
 function notesPolicy(): string {
   return [
-    "DURABLE TASK-STATE HANDOFF IS ACTIVE.",
-    "NOTES.md is a compact durable continuation/task-state handoff, not general notes, a diary, or proof. Live worktree/tool/test state is authoritative. Only the current top-level session writes its session-local file.",
+    "DURABLE TASK-STATE HANDOFF POLICY.",
+    "Notes activation is controlled by /notes. When Notes is active, NOTES.md is a compact durable continuation/task-state handoff, not general notes, a diary, or proof. Live worktree/tool/test state is authoritative. Only the current top-level session writes its session-local file.",
     CHECKPOINT_FIELD_GUIDANCE,
-    "Use checkpoint_notes after meaningful milestones, important findings/decisions, significant verification results, blockers, harness requests, and before reporting completion when the handoff is dirty. Do not checkpoint after minor observations. If checkpoint_notes fails, continue the main task, do not retry it in the same turn, and treat the eventual handoff as dirty until a later checkpoint succeeds.",
+    "When Notes is active, use checkpoint_notes after meaningful milestones, important findings/decisions, significant verification results, blockers, harness requests, and before reporting completion when the handoff is dirty. Do not checkpoint after minor observations. If checkpoint_notes fails, continue the main task, do not retry it in the same turn, and treat the eventual handoff as dirty until a later checkpoint succeeds.",
   ].join("\n");
 }
+
+// Keep the policy in every system prompt from session start. Appending it only
+// after automatic activation changes the prompt prefix and invalidates caches.
+const NOTES_POLICY = notesPolicy();
 
 function reminderMessage(text: string) {
   return { role: "custom" as const, customType: NOTES_REMINDER_TYPE, content: text, display: false, timestamp: Date.now() };
@@ -1288,8 +1292,7 @@ export default function notesExtension(pi: ExtensionAPI): void {
   });
   pi.on("before_agent_start", (event) => {
     if (runtime.sessionEnded) return undefined;
-    if (!runtime.active) return undefined;
-    return { systemPrompt: `${event.systemPrompt}\n\n${notesPolicy()}` };
+    return { systemPrompt: `${event.systemPrompt}\n\n${NOTES_POLICY}` };
   });
   pi.on("context", (event) => {
     if (runtime.sessionEnded) return { messages: stripNotesReminders(event.messages) };

@@ -54,7 +54,7 @@ Automatic activation is intentionally conservative: 8 turns or 32 tool calls aft
 The extension uses Pi core APIs only:
 
 - `tool_result` for independent high-signal activation, hybrid freshness tracking, and verification tracking.
-- `before_agent_start` for the static Notes policy.
+- `before_agent_start` for the static Notes policy, installed from session start so automatic activation does not invalidate prompt caches.
 - `context` for transient de-duplicated checkpoint/re-entry reminders.
 - `pi.appendEntry()` for branch-local dirty/checkpoint state.
 - `session_start`, `session_tree`, `session_compact`, and `session_compact_failed` for recovery.
