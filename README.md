@@ -88,6 +88,18 @@ npm pack --dry-run
 npm audit --omit=dev
 ```
 
+Before editing or pushing, install the repository-identity hooks:
+
+```sh
+npm run hooks:install
+npm run repo:verify -- --main
+```
+
+The hooks refuse to operate unless the Git root is this dedicated checkout and
+the selected push remote matches `package.json.repository`, and the checkout is
+on `main`. Do not edit a nested copy under another repository such as
+`pi-config`.
+
 The package has no runtime dependencies outside the Pi core packages and
 `typebox`, which Pi provides. The extension runs with the same local access as
 other Pi extensions; review the source before installing it in a sensitive

@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+remote_name=${1:-origin}
+exec node "$root/scripts/verify-repo-identity.mjs" --remote "$remote_name" --main

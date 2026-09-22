@@ -33,7 +33,9 @@
   "scripts": {
     "test": "vitest run --maxWorkers=1",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "repo:verify": "node scripts/verify-repo-identity.mjs",
+    "hooks:install": "node scripts/install-git-hooks.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
